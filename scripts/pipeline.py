@@ -16,7 +16,7 @@ TOOL_JS = "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/reso
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
-HTML_PATH = os.path.abspath(os.path.join(BASE, "..", "us_dividend_yield_ranking.html"))
+HTML_PATH = os.path.abspath(os.path.join(BASE, "..", "index.html"))
 
 # ---------------- 动态日期 ----------------
 TODAY = datetime.date.today()

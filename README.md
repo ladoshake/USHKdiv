@@ -19,13 +19,13 @@
 /Users/green/.workbuddy/binaries/python/versions/3.13.12/bin/python3 scripts/pipeline.py
 ```
 
-脚本会重新抓取美股 + 港股行情与分红历史、按市值分档并生成 `us_dividend_yield_ranking.html`。
+脚本会重新抓取美股 + 港股行情与分红历史、按市值分档并生成 `index.html`（站点入口，Vercel 静态部署默认读取根目录 `index.html`）。
 日期动态化（TTM 起点 = 今日 - 365 天），可直接用于每日定时更新。
 
 ## 文件
 
 - `scripts/pipeline.py` —— 抓取 + 构建一体化流水线（自包含）。
-- `us_dividend_yield_ranking.html` —— 生成的排行榜页面（自包含，可直接打开）。
+- `index.html` —— 生成的排行榜页面（自包含，站点入口，可直接打开 / 部署）。
 - `scripts/data/` —— 运行时中间产物（行情/分红 JSON、代码清单），由流水线重新生成，不入库。
 
 ## 数据说明

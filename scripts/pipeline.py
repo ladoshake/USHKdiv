@@ -344,6 +344,12 @@ def sanitize(d):
             d[k] = None
     return d
 
+def strip_mkt_prefix(code):
+    """去掉行情接口返回的市场前缀 us / hk，仅用于展示。"""
+    if code and code[:2].lower() in ("us", "hk"):
+        return code[2:]
+    return code
+
 def build_html(us, hk):
     def classify_us(d):
         mv = d["mv"]
@@ -378,7 +384,7 @@ def build_html(us, hk):
                 out = []
                 for i, d in enumerate(rows, 1):
                     out.append({
-                        "rank": i, "code": d["code"], "name": d["name"], "price": d.get("price"),
+                        "rank": i, "code": strip_mkt_prefix(d["code"]), "name": d["name"], "price": d.get("price"),
                         "total_mv_yi": d.get(mv_key), "dps": d.get(dk),
                         "div_count": d.get(ck), "yield": d.get(yk),
                         "prev_yield": d.get("prev_yield"), "prev2_yield": d.get("prev2_yield"),

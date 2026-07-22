@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-美股 / 港股 股息率排名 —— 每日自动更新流水线（单文件、可独立运行）
-流程：取代码宇宙 -> 批量 quote(真实市值/股息率TTM) -> 批量分红历史 -> 分市场分市值档 Top30 -> 写 HTML
+美股 股息率排名 —— 每日自动更新流水线（单文件、可独立运行）
+流程：取代码宇宙 -> 批量 quote(真实市值/股息率TTM) -> 批量分红历史 -> 分市值档 Top30 -> 写 HTML
 数据来源：腾讯自选股（westock-data skill 的行情/分红接口）
 """
 import subprocess, json, re, os, sys, time, datetime
@@ -53,36 +53,6 @@ def get_us_codes():
     log(f"US universe codes: {len(codes)}")
     return codes
 
-def get_hk_universe():
-    txt = run_filter("hk", 2500)
-    rows = []
-    for l in txt.splitlines():
-        if "| hk" not in l:
-            continue
-        cols = [c.strip() for c in l.strip().strip("|").split("|")]
-        if len(cols) < 4:
-            continue
-        try:
-            mv = float(cols[2])
-        except:
-            continue
-        rows.append((cols[0], cols[1], mv))
-    # 仅保留 >500亿港元（覆盖两档：>1000 / 500-1000）
-    THRESH = 500
-    rows = [r for r in rows if r[2] > THRESH]
-    # 去重：按归一化名（去掉 -R/-WR/-W 等柜台后缀），保留市值最大者
-    def base(n):
-        return re.sub(r'-[A-Z]{1,3}$', '', n).strip()
-    best = {}
-    for code, name, mv in rows:
-        b = base(name)
-        if b not in best or mv > best[b][2]:
-            best[b] = (code, name, mv)
-    uniq = sorted(best.values(), key=lambda x: -x[2])
-    json.dump(uniq, open(os.path.join(DATA_DIR, "hk_universe.json"), "w"), ensure_ascii=False, indent=1)
-    log(f"HK universe (>500亿HKD): raw={len(rows)} after dedupe={len(uniq)}")
-    return uniq
-
 # =====================================================================
 # 2) 批量行情 quote
 # =====================================================================
@@ -105,7 +75,7 @@ def parse_quotes_generic(text, market):
     if header and header[0] == "":
         header = header[1:]
     idx = {h: j for j, h in enumerate(header)}
-    prefix = "us" if market == "us" else "hk"
+    prefix = "us"
     res = {}
     p_idx, d_idx, m_idx = idx["price"], idx["dividend_ratio_ttm"], idx["total_market_cap"]
     for l in lines[hidx + 1:]:
@@ -192,46 +162,6 @@ def parse_us_div(txt):
             rows.append((d, v))
     return rows
 
-def parse_hk_div(txt):
-    rows = []
-    for l in txt.splitlines():
-        l = l.strip()
-        if not l.startswith("|"):
-            continue
-        if "reportEndDate" in l or "---" in l or l == "|":
-            continue
-        cols = [c.strip() for c in l.strip("|").split("|")]
-        if len(cols) < 5:
-            continue
-        try:
-            cash = float(cols[3])
-        except:
-            cash = 0.0
-        if cash <= 0:
-            continue
-        rows.append({
-            "reportEndDate": parse_date(cols[0]),
-            "exDiviDate": parse_date(cols[1]),
-            "cash": cash,
-        })
-    return rows
-
-def full_year_dps(rows):
-    """港股：按 reportEndDate 年份汇总，跳过当前部分年度残值，取最近完整财年。"""
-    by_year = {}
-    for r in rows:
-        if not r["reportEndDate"]:
-            continue
-        y = r["reportEndDate"].year
-        by_year[y] = by_year.get(y, 0.0) + r["cash"]
-    years = sorted(by_year.keys(), reverse=True)
-    if not years:
-        return None, None
-    chosen = years[0]
-    if len(years) > 1 and by_year[years[0]] < 0.6 * by_year[years[1]]:
-        chosen = years[1]
-    return chosen, by_year[chosen]
-
 def fetch_us_div(bucketed):
     def work(d):
         code = d["code"]
@@ -280,57 +210,6 @@ def fetch_us_div(bucketed):
     log(f"US enriched: {len(out)} (with div: {sum(1 for x in out if x['has_div'])})")
     return out
 
-def fetch_hk_div(quotes):
-    def work(q):
-        code = q["code"]
-        txt = run_div(code)
-        rec = {
-            "code": code, "name": q["name"], "price": q.get("price"),
-            "mv_hkd": q.get("mv"), "ttm_yield": q.get("ttm_yield"),
-            "has_div": False, "ttm_dps": None, "ttm_count": None,
-            "lfy_dps": None, "lfy_count": None, "lfy_yield": None,
-            "prev_yield": None, "prev2_yield": None,
-        }
-        if not txt:
-            return rec
-        rows = parse_hk_div(txt)
-        if not rows:
-            return rec
-        rec["has_div"] = True
-        price = q.get("price")
-        ttm_rows = [r for r in rows if r["exDiviDate"] and TTM_START <= r["exDiviDate"] <= TODAY]
-        if ttm_rows:
-            rec["ttm_dps"] = round(sum(r["cash"] for r in ttm_rows), 4)
-            rec["ttm_count"] = len(ttm_rows)
-        ly, ldps = full_year_dps(rows)
-        if ly is not None and price:
-            rec["lfy_dps"] = round(ldps, 4)
-            rec["lfy_count"] = sum(1 for r in rows if r["reportEndDate"] and r["reportEndDate"].year == ly)
-            rec["lfy_yield"] = round(ldps / price * 100, 3)
-        for yr, key in [(LATEST_YEAR - 1, "prev_yield"), (LATEST_YEAR - 2, "prev2_yield")]:
-            yr_rows = [r for r in rows if r["reportEndDate"] and r["reportEndDate"].year == yr]
-            if yr_rows and price:
-                s = round(sum(r["cash"] for r in yr_rows), 4)
-                rec[key] = round(s / price * 100, 3)
-        # 护栏：特殊分红/错误价格导致 LFY 畸高
-        ttm = rec.get("ttm_yield")
-        for k in ("lfy_yield", "prev_yield", "prev2_yield"):
-            v = rec.get(k)
-            if v is None or ttm is None:
-                continue
-            if v > ttm * 2.5 or v > 15:
-                rec[k] = None
-        return rec
-    result = []
-    with ThreadPoolExecutor(max_workers=10) as ex:
-        for i, rec in enumerate(ex.map(work, quotes), 1):
-            result.append(rec)
-            if i % 60 == 0:
-                log(f"  HK div progress {i}/{len(quotes)}")
-    json.dump(result, open(os.path.join(DATA_DIR, "hk_enriched.json"), "w"), ensure_ascii=False, indent=1)
-    log(f"HK enriched: {len(result)} (with div: {sum(1 for x in result if x['has_div'])})")
-    return result
-
 # =====================================================================
 # 4) 构建 HTML
 # =====================================================================
@@ -350,22 +229,15 @@ def strip_mkt_prefix(code):
         return code[2:]
     return code
 
-def build_html(us, hk):
+def build_html(us):
     def classify_us(d):
         mv = d["mv"]
-        if mv > 1000: return "gt1000"
-        if 500 < mv <= 1000: return "mid500"
-        return None
-    def classify_hk(d):
-        mv = (d.get("mv_hkd") or 0)
         if mv > 1000: return "gt1000"
         if 500 < mv <= 1000: return "mid500"
         return None
 
     US_CAPS = [{"key": "gt1000", "label": "市值 > 1000亿美元"},
                {"key": "mid500", "label": "500亿 < 市值 ≤ 1000亿美元"}]
-    HK_CAPS = [{"key": "gt1000", "label": "市值 > 1000亿港元"},
-               {"key": "mid500", "label": "500亿 < 市值 ≤ 1000亿港元"}]
 
     def build_market(records, classify, mv_key, cap_specs):
         groups = {"gt1000": [], "mid500": []}
@@ -398,10 +270,8 @@ def build_html(us, hk):
         return tiers
 
     us_tiers = build_market(us, classify_us, "mv", US_CAPS)
-    hk_tiers = build_market(hk, classify_hk, "mv_hkd", HK_CAPS)
     markets = [
         {"key": "us", "name": "美股", "cur": "美元", "price_unit": "美元", "dps_unit": "美元", "caps": US_CAPS, "tiers": us_tiers},
-        {"key": "hk", "name": "港股", "cur": "港元", "price_unit": "港元", "dps_unit": "港元", "caps": HK_CAPS, "tiers": hk_tiers},
     ]
     EMBEDDED = {"generated_at": GEN, "ttm_start": TTM_START_STR, "markets": markets}
     json_str = json.dumps(EMBEDDED, ensure_ascii=False)
@@ -411,7 +281,7 @@ def build_html(us, hk):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>美股 / 港股 股息率排名</title>
+<title>美股 股息率排名</title>
 <style>
   :root{
     --bg:#f5f6f8; --card:#ffffff; --ink:#1f2430; --sub:#6b7280;
@@ -476,7 +346,7 @@ def build_html(us, hk):
 <body>
 <div class="wrap">
   <header>
-    <h1>美股 / 港股 股息率排名</h1>
+    <h1>美股 股息率排名</h1>
     <div class="subhead">
       <p class="desc" id="desc">美股 · 市值 &gt; 1000亿美元 · 股息率排名</p>
       <div class="metabox">
@@ -488,7 +358,6 @@ def build_html(us, hk):
 
   <div class="marketsel" id="marketsel">
     <div class="mkt active" data-mkt="us">美股</div>
-    <div class="mkt" data-mkt="hk">港股</div>
   </div>
 
   <div class="capsel" id="capsel">
@@ -530,13 +399,12 @@ def build_html(us, hk):
   <div class="note">
     <h3>计算口径说明</h3>
     <ul>
-      <li><b>市值筛选</b>：提供两档——美股以美元计（市值 &gt; 1000 亿美元、500 亿美元 &lt; 市值 ≤ 1000 亿美元），港股以港元计（市值 &gt; 1000 亿港元、500 亿港元 &lt; 市值 ≤ 1000 亿港元），对两市场分别取各档内全部派息股按股息率排名（每档至多 Top 30）。</li>
-      <li><b>港股市值单位</b>：港股总市值以港元计，表中「总市值」列以<b>亿港元</b>展示；港股筛选条件直接使用港元基准，与美股美元基准相互独立。</li>
+      <li><b>市值筛选</b>：以美元计，提供两档——市值 &gt; 1000 亿美元、500 亿美元 &lt; 市值 ≤ 1000 亿美元，取各档内全部派息股按股息率排名（每档至多 Top 30）。</li>
       <li><b>股息率(TTM)</b>：行情接口「股息率TTM」= 近12个月每股股息 ÷ 现价 × 100%。</li>
       <li><b>每股分红 / 分红次数</b>：取自个股分红历史，统计除息日落在近 12 个月内的现金分红之和与次数；部分股票接口暂无分红历史，显示为「—」。</li>
       <li><b>LFY 股息率</b>：最近完整年度每股分红之和 ÷ 现价；历史列对应最近一年、前一年，口径同 LFY。</li>
-      <li><b>货币单位</b>：美股为美元，港股为港元（现价、每股分红、总市值均随市场切换）。MLP（有限合伙）分红含返还资本，解读时请注意。</li>
-      <li><b>数据来源</b>：腾讯自选股（美股/港股）实时行情与历史分红。榜单为计算快照，非投资建议。</li>
+      <li><b>货币单位</b>：美股为美元（现价、每股分红、总市值均按美元）。MLP（有限合伙）分红含返还资本，解读时请注意。</li>
+      <li><b>数据来源</b>：腾讯自选股（美股）实时行情与历史分红。榜单为计算快照，非投资建议。</li>
     </ul>
   </div>
 
@@ -710,20 +578,12 @@ def main():
     log(f"=== start (TODAY={GEN}, TTM_START={TTM_START_STR}, LATEST_YEAR={LATEST_YEAR}) ===")
     t0 = time.time()
 
-    log("[1/6] US universe")
+    log("[1/4] US universe")
     us_codes = get_us_codes()
 
-    log("[2/6] HK universe")
-    hk_uni = get_hk_universe()
-    hk_codes = [r[0] for r in hk_uni]
-
-    log("[3/6] US quotes")
+    log("[2/4] US quotes")
     us_quotes = fetch_quotes(us_codes, "us")
     us_recs = [us_quotes[c] for c in us_codes if c in us_quotes]
-
-    log("[4/6] HK quotes")
-    hk_quotes = fetch_quotes(hk_codes, "hk")
-    hk_recs = [hk_quotes[c] for c in hk_codes if c in hk_quotes]
 
     # 美股：过滤普通股 / 分桶（>1000亿 或 500-1000亿美元，单位亿美元）
     EXCLUDE = ("pfd", "pref", "depositary", "warrant", "wts")
@@ -737,13 +597,11 @@ def main():
         return 0
     us_bucketed = [d for d in us_recs if is_common(d) and us_bucket(d) in (1, 2)]
 
-    log("[5/6] US dividend history")
+    log("[3/4] US dividend history")
     us_enriched = fetch_us_div(us_bucketed)
 
-    log("[6/6] HK dividend history")
-    hk_enriched = fetch_hk_div(hk_recs)
-
-    build_html([sanitize(d) for d in us_enriched], [sanitize(d) for d in hk_enriched])
+    log("[4/4] build HTML")
+    build_html([sanitize(d) for d in us_enriched])
 
     log(f"=== done in {time.time()-t0:.1f}s ===")
 
